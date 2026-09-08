@@ -283,7 +283,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--signing-identity",
-        help="Developer ID Application identity for distribution signing. Omit for local ad-hoc testing.",
+        help="Developer ID Application identity for distribution signing. Omit for ad-hoc signing (not notarized).",
     )
     parser.add_argument(
         "--notary-profile",
@@ -364,7 +364,8 @@ def main() -> int:
             print(f"Developer ID-signed but not notarized DMG: {output}")
             print("Notarization was not requested; do not publish this artifact as a notarized release.")
         else:
-            print(f"Local testing only: ad-hoc signed and not notarized DMG: {output}")
+            print(f"Ad-hoc signed and not notarized DMG: {output}")
+            print("No verified developer identity; Gatekeeper may block the downloaded app.")
         return 0
     finally:
         if mounted is not None:

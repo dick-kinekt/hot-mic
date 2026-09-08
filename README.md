@@ -6,7 +6,7 @@
 
 Hot Mic is a native macOS dictation app that streams microphone audio to the ElevenLabs Scribe v2 Realtime API and copies finalized text to the clipboard. It is a regular Dock and Cmd-Tab app with a menu-bar control and a floating recording bar.
 
-> Hot Mic is source software. This repository does not currently provide a GitHub Release or a downloadable installer. Build it yourself or package it as described below.
+> Releases include source and a universal macOS DMG. The app is **ad-hoc signed, not Developer ID signed or notarized**; Gatekeeper may block downloaded copies. Ad-hoc signing does not establish a verified developer identity.
 
 ## Features
 
@@ -21,7 +21,7 @@ Hot Mic is a native macOS dictation app that streams microphone audio to the Ele
 ## Requirements
 
 - macOS 14 or later.
-- Full Xcode with Swift 6 for building from source.
+- Full Xcode 26 or later (Swift 6.2) for building from source; the pinned `KeyboardShortcuts` dependency requires Swift 6.2.
 - An ElevenLabs account, API key with speech-to-text access, and available credit for dictation.
 - A microphone and macOS microphone permission.
 
@@ -136,47 +136,14 @@ Hot Mic is deliberately a copy-only dictation workflow. It currently has no:
 
 Physical global-shortcut presses and every sleep, input-device, and provider-account condition depend on the local macOS and ElevenLabs environment.
 
-## Package a DMG
+## Releases
 
-Packaging is for macOS and requires full Xcode, Python 3.10 or later, and the system tools used by `scripts/build_dmg.py`. Create an isolated virtual environment, install the package-only dependencies, then run the packaging script:
+[GitHub Releases](https://github.com/dick-kinekt/hot-mic/releases) contain
+versioned source archives, universal macOS DMGs, and SHA-256 checksums.
+The app is ad-hoc signed and not notarized; Gatekeeper may block downloaded copies.
 
-```sh
-python3 -m venv --copies .build/dmg-tools
-.build/dmg-tools/bin/python -m pip install -r scripts/dmg-requirements.txt
-.build/dmg-tools/bin/python scripts/build_dmg.py
-```
-
-With no `--app` argument, the script builds a universal Release app and writes `dist/Hot-Mic-<version>.dmg`. It uses standard operating-system temporary storage by default. To choose the parent directory for temporary staging, pass `--work-dir`; a relative path resolves from the repository root and a missing directory is created:
-
-```sh
-.build/dmg-tools/bin/python scripts/build_dmg.py --work-dir /path/to/writable-temporary-parent
-```
-
-To package an existing app instead of building one, pass `--app`:
-
-```sh
-.build/dmg-tools/bin/python scripts/build_dmg.py --app '/path/to/Hot Mic.app'
-```
-
-The default package is ad-hoc signed for local testing and is **not notarized**. Do not represent it as a notarized or frictionless public download. For Developer ID distribution, provide your own signing identity and existing notarytool Keychain profile:
-
-```sh
-.build/dmg-tools/bin/python scripts/build_dmg.py \
-  --signing-identity 'Developer ID Application: Your Name (TEAMID)' \
-  --notary-profile YOUR_NOTARY_PROFILE
-```
-
-`--notary-profile` requires `--signing-identity`. No signing identity, account credential, or notary profile is included in this repository.
-To install a locally built DMG, open it, drag **Hot Mic** onto **Applications**,
-eject the image, and open the app from Applications. Quit any development copy
-before opening the installed one. Each user supplies their own ElevenLabs key.
-
-The original app icon and installer artwork can be regenerated with:
-
-```sh
-xcrun swift scripts/generate_brand_assets.swift
-```
-
+See [RELEASING.md](RELEASING.md) for release commands, download verification,
+workflow recovery, and local DMG packaging.
 
 ## Focused checks
 
@@ -234,7 +201,10 @@ PACKAGE_RESOURCE_BUNDLE_PATH="$PWD/.build/Build/Products/Debug" \
 - `Dictation.xcodeproj/` — Xcode project and Swift Package resolution.
 - `Resources/` — app metadata, entitlements, and DMG artwork.
 - `Tests/` — focused smoke programs and the local realtime fixture.
-- `scripts/` — DMG packaging and focused verification helpers.
+- `scripts/` — source-release and DMG packaging plus focused verification helpers.
+- `.github/workflows/release.yml` — source and DMG validation, tagged releases, and manual publication.
+- `pixi.toml` / `pixi.lock` — locked release tooling and the one-command release task.
+- [`RELEASING.md`](RELEASING.md) — release procedures, artifact verification, and DMG packaging.
 - [`CHANGELOG.md`](CHANGELOG.md) — public version history.
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — third-party software notices.
 

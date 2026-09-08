@@ -1,0 +1,15 @@
+[workspace]
+name = "hot-mic"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64"]
+
+[dependencies]
+python = "3.12.*"
+git = ">=2.45,<3"
+gh = ">=2.80,<3"
+actionlint = ">=1.7,<2"
+
+[tasks]
+release = { cmd = "python scripts/cut_release.py", description = "Cut and publish a version from remote main; pass VERSION and optionally --dry-run" }
+check-release = { cmd = "python Tests/ReleaseCutSmoke.py", description = "Exercise release cutting against disposable Git repositories" }
+lint-release = { cmd = "actionlint .github/workflows/release.yml", description = "Validate release workflow syntax" }

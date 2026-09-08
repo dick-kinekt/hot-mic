@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag, e.g. v1.0 (required to publish; blank validates the selected ref)'
+        type: string
+        default: ''
+      publish:
+        description: 'Publish a GitHub Release with source and an ad-hoc-signed, NOT notarized DMG'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build source and universal DMG
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ env.RELEASE_TAG }}
+      publish: ${{ env.PUBLISH_RELEASE }}
+      commit: ${{ steps.source.outputs.commit }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+      PUBLISH_RELEASE: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    steps:
+      - name: Validate release request
+        run: |
+          if [[ "$PUBLISH_RELEASE" == 'true' && -z "$RELEASE_TAG" ]]; then
+            echo 'Publishing requires an existing version tag in the tag input.' >&2
+            exit 1
+          fi
+          if [[ -n "$RELEASE_TAG" && ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo 'Release tag must be vX.Y or vX.Y.Z.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || '' }}
+          persist-credentials: false
+      - name: Check release cutting safety
+        run: python3 Tests/ReleaseCutSmoke.py
+      - name: Package committed source and validate version
+        id: source
+        run: |
+          version=$(python3 scripts/build_source_release.py --tag "$RELEASE_TAG")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+          mkdir -p .build/release-source
+          tar -xzf "dist/hot-mic-$version.tar.gz" -C .build/release-source
+      - name: Build universal app from the source archive
+        working-directory: .build/release-source/hot-mic-${{ steps.source.outputs.version }}
+        run: |
+          xcodebuild -version
+          xcodebuild -project Dictation.xcodeproj -scheme Dictation \
+            -configuration Release -destination 'generic/platform=macOS' \
+            -derivedDataPath .build/release-derived \
+            -onlyUsePackageVersionsFromResolvedFile \
+            'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO build
+          app='.build/release-derived/Build/Products/Release/Hot Mic.app'
+          lipo "$app/Contents/MacOS/Hot Mic" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$app"
+          test -f "$app/Contents/Resources/LICENSE"
+          test -f "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
+      - name: Package ad-hoc-signed DMG (not notarized)
+        working-directory: .build/release-source/hot-mic-${{ steps.source.outputs.version }}
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          python3 -m venv --copies .build/dmg-tools
+          .build/dmg-tools/bin/python -m pip install -r scripts/dmg-requirements.txt
+          .build/dmg-tools/bin/python scripts/build_dmg.py \
+            --app '.build/release-derived/Build/Products/Release/Hot Mic.app'
+          hdiutil verify "dist/Hot-Mic-$VERSION.dmg"
+          cp "dist/Hot-Mic-$VERSION.dmg" "$GITHUB_WORKSPACE/dist/Hot-Mic-$VERSION-macos-universal-adhoc.dmg"
+      - name: Checksum all release assets
+        working-directory: dist
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          shasum -a 256 "hot-mic-$VERSION.tar.gz" "Hot-Mic-$VERSION-macos-universal-adhoc.dmg" > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+      - name: Upload validated release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: |
+            dist/hot-mic-${{ steps.source.outputs.version }}.tar.gz
+            dist/Hot-Mic-${{ steps.source.outputs.version }}-macos-universal-adhoc.dmg
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish full release
+    if: needs.build.outputs.publish == 'true'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify downloaded assets
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - name: Create release without replacing existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          current_commit=$(gh api "repos/$GH_REPO/commits/refs/tags/$RELEASE_TAG" --jq .sha)
+          if [[ "$current_commit" != "$RELEASE_COMMIT" ]]; then
+            echo 'The release tag moved after the build; refusing to publish mismatched assets.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            "dist/hot-mic-${RELEASE_TAG#v}.tar.gz" \
+            "dist/Hot-Mic-${RELEASE_TAG#v}-macos-universal-adhoc.dmg" dist/SHA256SUMS \
+            --verify-tag --title "Hot Mic $RELEASE_TAG" --generate-notes \
+            --notes 'The universal macOS DMG is ad-hoc signed, NOT Developer ID signed or notarized. It supports Apple Silicon and Intel Macs running macOS 14 or later. Gatekeeper may block the downloaded app; an ad-hoc signature does not establish a verified developer identity. Do not disable macOS security protections to run an untrusted copy. Source and SHA256SUMS are included for verification and downstream packaging. Building from source requires Xcode 26 or later (Swift 6.2). See README.md and CHANGELOG.md for details.'

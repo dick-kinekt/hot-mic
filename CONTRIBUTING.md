@@ -4,7 +4,7 @@ Thanks for improving Hot Mic. Keep changes small, reviewable, and focused on an 
 
 ## Development setup
 
-1. Install full Xcode with Swift 6 on macOS 14 or later.
+1. Install full Xcode 26 or later with Swift 6.2 on a supported macOS version. The built app supports macOS 14 or later.
 2. Clone the repository and open `Dictation.xcodeproj` in Xcode, or use the documented build command in [README.md](README.md).
 3. Let Xcode resolve the pinned `KeyboardShortcuts` package dependency.
 4. Use your own ElevenLabs account only when you intentionally need a live manual check. Do not add credentials to the repository or test setup.
@@ -43,6 +43,11 @@ Include:
 - Any limitations, platform assumptions, or follow-up discussion needed.
 
 Keep commits and pull requests easy to review. Maintainers may ask for a smaller scope, an issue or discussion first, or a reproducible local test case before accepting a change.
+
+## Cutting a release
+
+Follow [RELEASING.md](RELEASING.md) for the Pixi release command, prerequisites,
+workflow checks, and recovery after a failed release.
 
 ## Security issues
 

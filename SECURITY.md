@@ -2,7 +2,7 @@
 
 ## Supported version
 
-The supported version is the initial public source release, **1.0**, represented by the current repository source. There are no older supported releases or published binary artifacts at this time. Security fixes are expected to land in current source; build from source unless and until a signed release is explicitly published.
+The supported version is **1.0**, represented by the current repository source. There are no older supported releases. Security fixes are expected to land in current source and subsequent releases. Automated release apps use ad-hoc signatures; they are not Developer ID signed or notarized.
 
 ## Reporting a vulnerability
 
@@ -37,7 +37,9 @@ The app can request zero retention with `enable_logging=false`, but that request
 
 ## Binary and download safety
 
-This repository does not claim to provide a public release download. Local DMGs produced by the default packaging command are ad-hoc signed and not notarized. Treat unsigned, ad-hoc-signed, or unverifiable copies from third parties as untrusted; obtain source from the repository, inspect it, and build it yourself, or use an explicitly published and verifiable signed release if one becomes available. Do not bypass macOS security protections to run an untrusted copy.
+The release workflow publishes source archives, universal macOS DMGs, and SHA-256 checksums. The app in each automated release DMG is **ad-hoc signed, not Developer ID signed or notarized**. This signature does not establish a verified developer identity, and Gatekeeper may block downloaded copies.
+
+Obtain downloads only from this repository's GitHub Releases and verify both assets against the release's `SHA256SUMS`. A checksum detects changed bytes but is not a code-signing identity or notarization ticket. If a release is blocked or you cannot establish trust in a download, inspect and build the source instead. Treat unverifiable copies from third parties as untrusted. Do not disable macOS security protections to run an untrusted copy.
 
 ## Scope
 
