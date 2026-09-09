@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-09-09
+
 - Raise the continuous recording ceiling from five minutes to 24 hours, retaining pause/finalize/copy behavior.
 - Add a local Transcripts archive with one entry per session, durable stable-text checkpoints, and full-text review/copy.
 - Add configurable automatic transcript deletion, defaulting to 14 days from the last session update, checked on launch, wake/activation and every minute while running.
