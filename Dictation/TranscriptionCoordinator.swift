@@ -34,6 +34,7 @@ struct TranscriptionCoordinatorDependencies {
     let makeCapture: () -> any TranscriptionAudioCapturing
     let makeClient: (@escaping @MainActor (RealtimeEvent) -> Void) -> any TranscriptionRealtimeSession
     let copyToPasteboard: (String) -> Bool
+    var now: () -> ContinuousClock.Instant = { .now }
 
     static func live() -> Self {
         let credentials = CredentialStore()
@@ -86,6 +87,10 @@ final class TranscriptionCoordinator: ObservableObject {
 
     private let settings: DictationSettings
     private let dependencies: TranscriptionCoordinatorDependencies
+    private let archive: TranscriptArchive?
+    private var archiveID = UUID()
+    private var archiveStartedAt = Date()
+    private var archiveSaveFailed = false
     private var capture: (any TranscriptionAudioCapturing)?
     private var client: (any TranscriptionRealtimeSession)?
     private var streamID: UUID?
@@ -110,16 +115,18 @@ final class TranscriptionCoordinator: ObservableObject {
 
     var capturing: Bool { capture?.isCapturing == true }
 
-    convenience init(settings: DictationSettings) {
-        self.init(settings: settings, dependencies: .live())
+    convenience init(settings: DictationSettings, archive: TranscriptArchive) {
+        self.init(settings: settings, dependencies: .live(), archive: archive)
     }
 
     init(
         settings: DictationSettings,
-        dependencies: TranscriptionCoordinatorDependencies
+        dependencies: TranscriptionCoordinatorDependencies,
+        archive: TranscriptArchive? = nil
     ) {
         self.settings = settings
         self.dependencies = dependencies
+        self.archive = archive
         refreshPermissions()
         do { hasKey = try dependencies.loadCredential() != nil }
         catch { notice = error.localizedDescription; isError = true }
@@ -244,6 +251,7 @@ final class TranscriptionCoordinator: ObservableObject {
 
         let recovered = commitCurrentPartialText()
         releaseCurrentStream(cancelClient: true, cancelFinishTask: true)
+        checkpointArchive(incomplete: hasIncompleteText)
         state = isPresented ? .paused : .idle
         isClosing = false
         isError = false
@@ -256,6 +264,7 @@ final class TranscriptionCoordinator: ObservableObject {
     func reset() {
         guard isPresented else { return }
 
+        checkpointArchive(incomplete: active || hasIncompleteText)
         releaseCurrentStream(cancelClient: true, cancelFinishTask: true)
         beginNewDictation()
         notice = "Ready to continue dictation."
@@ -263,6 +272,11 @@ final class TranscriptionCoordinator: ObservableObject {
 
     func clearResult() {
         guard !active else { return }
+        checkpointArchive(incomplete: hasIncompleteText)
+        archiveID = UUID()
+        archiveStartedAt = Date()
+        accumulatedRecordingSeconds = 0
+        recordingSeconds = 0
         completedSegments.removeAll(keepingCapacity: true)
         committedCurrentSegment.removeAll(keepingCapacity: true)
         provisionalCurrentSegment.removeAll(keepingCapacity: true)
@@ -281,6 +295,9 @@ final class TranscriptionCoordinator: ObservableObject {
             notice = hasIncompleteText
                 ? "Copied recovered text. It may be incomplete; clipboard-history tools may retain it."
                 : "Copied. Clipboard-history tools may retain this text."
+            if archiveSaveFailed {
+                notice += " Saving to Transcripts failed; keep this copy and check Settings."
+            }
             if isClosing, state == .paused { dismissDictation() }
         } else {
             copySucceeded = false
@@ -291,6 +308,9 @@ final class TranscriptionCoordinator: ObservableObject {
     }
 
     private func beginNewDictation() {
+        archiveID = UUID()
+        archiveStartedAt = Date()
+        archiveSaveFailed = false
         // Set this first so a non-activating bar can surface before any Keychain interaction.
         isPresented = true
         isClosing = false
@@ -339,7 +359,7 @@ final class TranscriptionCoordinator: ObservableObject {
         isClosing = false
         isError = false
         state = .starting
-        segmentRequestedAt = .now
+        segmentRequestedAt = dependencies.now()
         activeRecordingBeganAt = nil
         finalizationBeganAt = nil
         microphoneStartMS = nil
@@ -372,7 +392,7 @@ final class TranscriptionCoordinator: ObservableObject {
                 return
             }
 
-            activeRecordingBeganAt = .now
+            activeRecordingBeganAt = dependencies.now()
             microphoneStartMS = milliseconds(since: segmentRequestedAt)
             notice = "Microphone active. Audio is buffered in memory while ElevenLabs connects."
 
@@ -416,6 +436,7 @@ final class TranscriptionCoordinator: ObservableObject {
                 append(stable, to: &committedCurrentSegment)
             }
             refreshPreviewTranscript()
+            checkpointArchive(incomplete: true)
         case .failed(let message):
             finalizationFailed(message, streamID: id)
         }
@@ -435,10 +456,10 @@ final class TranscriptionCoordinator: ObservableObject {
         updateRecordingDuration()
         do {
             try drainAudio()
-            if let activeRecordingBeganAt, seconds(since: activeRecordingBeganAt) >= 300 {
+            if let activeRecordingBeganAt, seconds(since: activeRecordingBeganAt) >= 24 * 60 * 60 {
                 pause()
                 if state == .finalizing {
-                    notice = "Five-minute recording limit reached; finishing with the microphone off."
+                    notice = "24-hour recording limit reached; finishing with the microphone off."
                 }
             }
         } catch {
@@ -469,7 +490,7 @@ final class TranscriptionCoordinator: ObservableObject {
         }
 
         stopCapture()
-        finalizationBeganAt = .now
+        finalizationBeganAt = dependencies.now()
         state = .finalizing
         notice = isClosing
             ? "Finishing transcription and copying before closing; microphone is off."
@@ -513,6 +534,7 @@ final class TranscriptionCoordinator: ObservableObject {
         releaseCurrentStream(cancelClient: false, cancelFinishTask: false)
         state = .paused
         isError = false
+        checkpointArchive(incomplete: hasIncompleteText)
         notice = "Dictation complete. Copying the cumulative result."
         copyResult()
     }
@@ -538,6 +560,7 @@ final class TranscriptionCoordinator: ObservableObject {
         let recovered = commitCurrentPartialText()
         releaseCurrentStream(cancelClient: true, cancelFinishTask: true)
         state = isPresented ? .paused : .idle
+        checkpointArchive(incomplete: hasIncompleteText)
         isClosing = false
         isError = true
         notice = message + (recovered ? " Committed text recovered below; it may be incomplete." : "")
@@ -620,6 +643,22 @@ final class TranscriptionCoordinator: ObservableObject {
         capture?.stop()
     }
 
+    /// Save stable provider commits, never speculative live hypotheses. One row survives
+    /// Pause/Continue; Reset and Clear start a new identity without erasing the archive.
+    private func checkpointArchive(incomplete: Bool) {
+        guard let archive else { return }
+        var text = transcript
+        append(committedCurrentSegment, to: &text)
+        guard !text.isEmpty else { return }
+        let duration = accumulatedRecordingSeconds
+            + (activeRecordingBeganAt.map { seconds(since: $0) } ?? 0)
+        archiveSaveFailed = !archive.save(
+            id: archiveID, startedAt: archiveStartedAt, updatedAt: Date(),
+            text: text, duration: duration, language: detectedLanguage,
+            isIncomplete: incomplete
+        )
+    }
+
     private func refreshTranscript() {
         transcript = assembledText(completedSegments)
         refreshPreviewTranscript()
@@ -651,7 +690,7 @@ final class TranscriptionCoordinator: ObservableObject {
     }
 
     private func seconds(since instant: ContinuousClock.Instant) -> Double {
-        let components = instant.duration(to: .now).components
+        let components = instant.duration(to: dependencies.now()).components
         return Double(components.seconds) + Double(components.attoseconds) / 1e18
     }
 }

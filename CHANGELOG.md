@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Raise the continuous recording ceiling from five minutes to 24 hours, retaining pause/finalize/copy behavior.
+- Add a local Transcripts archive with one entry per session, durable stable-text checkpoints, and full-text review/copy.
+- Add configurable automatic transcript deletion, defaulting to 14 days from the last session update, checked on launch, wake/activation and every minute while running.
+- Preserve archived stable text across Reset/cancellation; mark interrupted checkpoints incomplete and keep provisional guesses out of history.
+- Document local archive privacy separately from ElevenLabs retention and add archive/duration regressions.
+
 ## 0.1.0 — 2026-09-09
 
 - Tagged and manually triggered releases with version-checked source archives, universal ad-hoc-signed DMGs, and SHA-256 checksums for both assets.

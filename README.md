@@ -16,7 +16,8 @@ Hot Mic is a native macOS dictation app that streams microphone audio to the Ele
 - Pause, continue, reset, and finish-and-close controls.
 - English, Dutch, or automatic language selection plus optional vocabulary hints.
 - API key stored only in the macOS Keychain; no plaintext fallback.
-- No app-created audio files, transcript logs, backend, analytics, or automatic paste.
+- Local transcript archive with configurable automatic retention (14 days by default).
+- No app-created audio files, backend, analytics, or automatic paste.
 
 ## Requirements
 
@@ -71,13 +72,40 @@ read without being pulled back down; **Latest** resumes following. Collapse
 returns to the latest two lines. Language, vocabulary and privacy choices persist
 between launches; **Session** shows only the current dictation, not saved history.
 
+## Transcript archive and recording duration
+
+**Transcripts** lists saved sessions with their text, date, recording duration and
+language. Pause/Continue updates one session; Reset, shortcut cancellation and
+Clear Result clear the live text but keep already archived stable text. Provider
+commits are checkpointed during recording; finalization updates the saved result.
+Interrupted sessions are marked incomplete. Provisional live guesses are not saved.
+Earlier dictations from versions without the archive cannot be recovered.
+
+The app permits **24 hours of continuous recording** before automatically pausing,
+finalizing and copying. Continue starts another stretch in the same session.
+Provider restrictions, connection failures and sleep can still interrupt capture;
+this is not a guarantee of an uninterrupted 24-hour provider connection.
+
+Set **Keep transcripts for … days** in Transcripts and press **Apply**. The default
+is 14 days, configurable from 1 to 3,650 days, measured from the session's last
+update. Reducing retention requires confirmation and deletes newly expired entries.
+Expiry runs every minute while Hot Mic is open, on launch, and on wake/activation.
+If the app is closed, expired records are removed when it next starts.
+Increasing retention does not recover deleted transcripts.
+
+Archive data lives in `~/Library/Application Support/Hot Mic/transcripts.sqlite3`.
+It uses private filesystem permissions, not application-level encryption; protect
+the Mac/account accordingly. Deletion does not remove external backups or clipboard
+copies. Provider zero retention is separate from this local retention policy.
+
 
 ## Privacy, provider data, and charges
 
 Microphone capture runs only while recording. Audio is sent directly to ElevenLabs;
 already-buffered audio can finish sending after capture stops, during finalization.
-Hot Mic has no backend and does not create audio files or transcript logs. It does
-not log API keys, authorization headers, raw audio, WebSocket payloads, or transcripts.
+Hot Mic has no backend and does not create audio files. Stable transcript text and
+session metadata are stored locally for the configured retention period. Diagnostic
+logs do not contain API keys, authorization headers, raw audio, payloads or transcripts.
 
 Dictation uses the account holder's ElevenLabs API access and can incur ElevenLabs charges, including additional cost for keyterm prompting. Review the provider's terms, pricing, and data practices before use.
 
@@ -130,7 +158,6 @@ Keep the recording bar open and use its **Copy** action, or open **Session** in 
 Hot Mic is deliberately a copy-only dictation workflow. It currently has no:
 
 - Automatic paste, Return-key synthesis, or focus restoration.
-- Durable transcript history; uncopied in-memory text is lost on quit or when a new dictation replaces it.
 - Raycast integration or Raycast history.
 - Launch-at-login support.
 
@@ -175,9 +202,20 @@ xcrun swiftc -target "$ARCH-apple-macosx14.0" -swift-version 6 \
   -framework AppKit -framework AVFoundation -framework Security \
   Dictation/AudioCapture.swift Dictation/CredentialStore.swift \
   Dictation/DictationSettings.swift Dictation/RealtimeClient.swift \
-  Dictation/TranscriptionCoordinator.swift Tests/RecordingWorkflowSmoke.swift \
+  Dictation/TranscriptArchive.swift Dictation/TranscriptionCoordinator.swift Tests/RecordingWorkflowSmoke.swift \
   -o .build/verification/recording-workflow-smoke
 .build/verification/recording-workflow-smoke
+```
+
+Archive persistence, retention boundaries, policy updates and corruption checks:
+
+```sh
+mkdir -p .build/verification
+xcrun swiftc -swift-version 6 -warnings-as-errors -strict-concurrency=complete \
+  -parse-as-library Dictation/RealtimeClient.swift Dictation/DictationSettings.swift \
+  Dictation/TranscriptArchive.swift Tests/TranscriptArchiveSmoke.swift \
+  -o .build/verification/transcript-archive-smoke
+.build/verification/transcript-archive-smoke
 ```
 
 The shortcut smoke check requires a Debug build first so the pinned KeyboardShortcuts product is available:

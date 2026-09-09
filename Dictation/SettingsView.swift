@@ -8,8 +8,8 @@ struct SettingsView: View {
         case general
         case speech
         case privacy
+        case transcripts
         case session
-
         var id: Self { self }
 
         var title: String {
@@ -17,6 +17,7 @@ struct SettingsView: View {
             case .general: "General"
             case .speech: "Speech"
             case .privacy: "Privacy"
+            case .transcripts: "Transcripts"
             case .session: "Session"
             }
         }
@@ -26,6 +27,7 @@ struct SettingsView: View {
             case .general: "Connection, microphone, and shortcut readiness."
             case .speech: "Language and vocabulary hints for the next recording."
             case .privacy: "How audio and text are handled by the provider."
+            case .transcripts: "Saved local transcript text and automatic deletion."
             case .session: "The current dictation, live controls, and timings."
             }
         }
@@ -35,6 +37,7 @@ struct SettingsView: View {
             case .general: "gearshape"
             case .speech: "waveform"
             case .privacy: "hand.raised"
+            case .transcripts: "text.book.closed"
             case .session: "mic"
             }
         }
@@ -46,12 +49,17 @@ struct SettingsView: View {
 
     @ObservedObject var model: TranscriptionCoordinator
     @ObservedObject var settings: DictationSettings
+    @ObservedObject var archive: TranscriptArchive
     @ObservedObject var shortcuts: RecordingShortcutController
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var apiKey = ""
     @State private var selectedSection: Section?
     @State private var showsRemoveKeyConfirmation = false
+    @State private var retentionDaysInput: String
+    @State private var retentionInputError: String?
+    @State private var pendingRetentionDays: Int?
+    @State private var showsRetentionReductionConfirmation = false
     @FocusState private var focusedField: FocusedField?
 
     private static let privacyGuidanceURL = URL(string: "https://elevenlabs.io/docs/help-center/legal/is-my-data-used-to-improve-eleven-labs-ai-models")!
@@ -59,13 +67,16 @@ struct SettingsView: View {
     init(
         model: TranscriptionCoordinator,
         settings: DictationSettings,
+        archive: TranscriptArchive,
         shortcuts: RecordingShortcutController,
         initialSection: Section = .general
     ) {
         self.model = model
         self.settings = settings
+        self.archive = archive
         self.shortcuts = shortcuts
         _selectedSection = State(initialValue: initialSection)
+        _retentionDaysInput = State(initialValue: String(settings.transcriptRetentionDays))
     }
 
     var body: some View {
@@ -88,8 +99,31 @@ struct SettingsView: View {
         } message: {
             Text("This removes the ElevenLabs API key from macOS Keychain. You will need to enter it again before recording.")
         }
+        .confirmationDialog(
+            "Reduce transcript retention?",
+            isPresented: $showsRetentionReductionConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Apply Shorter Retention", role: .destructive) {
+                if let pendingRetentionDays {
+                    applyRetentionDays(pendingRetentionDays)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingRetentionDays = nil
+                retentionDaysInput = String(settings.transcriptRetentionDays)
+            }
+        } message: {
+            Text("Reducing retention can permanently delete saved transcripts that are already older than the new \(pendingRetentionDays ?? settings.transcriptRetentionDays)-day limit.")
+        }
         .onAppear {
             model.refreshPermissions()
+            retentionDaysInput = String(settings.transcriptRetentionDays)
+        }
+        .onChange(of: settings.transcriptRetentionDays) { _, days in
+            if !showsRetentionReductionConfirmation {
+                retentionDaysInput = String(days)
+            }
         }
         .onDisappear {
             apiKey = ""
@@ -165,18 +199,23 @@ struct SettingsView: View {
         .accessibilityLabel("Hot Mic settings sections")
     }
 
+    @ViewBuilder
     private var detail: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                detailHeader
-                sectionContent
+        if activeSection == .transcripts {
+            transcriptDetail
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    detailHeader
+                    sectionContent
+                }
+                .frame(maxWidth: 760, alignment: .leading)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 26)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: 760, alignment: .leading)
-            .padding(.horizontal, 28)
-            .padding(.vertical, 26)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .scrollIndicators(.automatic)
         }
-        .scrollIndicators(.automatic)
     }
 
     private var detailHeader: some View {
@@ -208,9 +247,11 @@ struct SettingsView: View {
             speechContent
         case .privacy:
             privacyContent
+        case .transcripts:
+            EmptyView()
         case .session:
             sessionContent
-        }
+    }
     }
 
     private var generalContent: some View {
@@ -455,7 +496,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             SettingsCard("Before recording") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Audio streams directly to ElevenLabs while you dictate. This app saves no audio files or transcript logs. Dictation can incur ElevenLabs usage charges.")
+                    Text("Audio streams directly to ElevenLabs while you dictate. Hot Mic stores stable completed transcript text locally in its archive, but saves no audio files and sends no analytics. Dictation can incur ElevenLabs usage charges.")
                         .fixedSize(horizontal: false, vertical: true)
 
                     Text("Before real use: in your ElevenLabs account, open Terms and privacy → Data use and turn off ‘Improve the models for everyone’. Opt-out covers future submissions; it is not zero retention.")
@@ -485,6 +526,55 @@ struct SettingsView: View {
                 .disabled(model.active)
             }
         }
+    }
+
+    private var transcriptDetail: some View {
+        GeometryReader { geometry in
+            VStack(alignment: .leading, spacing: 18) {
+                detailHeader
+                transcriptContent
+            }
+            .frame(maxWidth: 760, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 26)
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+        }
+    }
+
+    private var transcriptContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SettingsCard("Automatic deletion", detail: "Transcript text is stored locally on this Mac. Audio is never archived.") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Keep transcripts for")
+                        TextField("Days", text: $retentionDaysInput)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 62)
+                            .accessibilityLabel("Transcript retention days")
+                        Text("days")
+                            .foregroundStyle(.secondary)
+                        Button("Apply", action: requestRetentionDaysChange)
+                            .buttonStyle(.bordered)
+                        Spacer(minLength: 0)
+                    }
+
+                    Text("Enter a whole number from 1 to 3,650. Expired transcripts are deleted automatically while Hot Mic is running. If the app is closed when they expire, it deletes them on the next launch.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let retentionInputError {
+                        Label(retentionInputError, systemImage: "exclamationmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            TranscriptArchiveView(archive: archive)
+        }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var sessionContent: some View {
@@ -542,13 +632,21 @@ struct SettingsView: View {
                         .foregroundStyle(model.isError ? Color.red : Color.secondary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    if let archiveError = archive.errorMessage {
+                        Label("Transcript archive: \(archiveError)", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
 
-            SettingsCard("Current dictation", detail: "Not saved to history.") {
+            SettingsCard("Current dictation", detail: "Stable committed text is retained in Transcripts.") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(model.transcript.isEmpty ? "Completed text appears here after you pause. Continue appends to this dictation." : model.transcript)
+                    Text(model.transcript.isEmpty ? "Completed text appears here after you pause. Continue appends to this dictation; stable committed text is archived separately." : model.transcript)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, minHeight: 110, alignment: .topLeading)
                         .padding(10)
@@ -571,7 +669,7 @@ struct SettingsView: View {
                         }
                     }
 
-                    Text("Pausing copies the complete dictation to your clipboard. Closing while recording finishes and copies before dismissing. No automatic paste or Return is sent; clipboard managers may retain copied text.")
+                    Text("Pausing copies the complete dictation to your clipboard. Closing while recording finishes and copies before dismissing. Resetting or cancelling clears the live session, but keeps already archived stable text; provisional hypotheses are never retained. No automatic paste or Return is sent; clipboard managers may retain copied text.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -579,7 +677,7 @@ struct SettingsView: View {
             }
             DisclosureGroup("Performance details") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Each recording segment pauses automatically after 5 minutes. Paused time is not recorded. Short final segments are padded with silence for provider processing after the microphone is off.")
+                    Text("Each recording segment pauses automatically after 24 hours. Paused time is not recorded. Short final segments are padded with silence for provider processing after the microphone is off.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -597,6 +695,29 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private func requestRetentionDaysChange() {
+        let trimmedInput = retentionDaysInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let days = Int(trimmedInput), (1...3_650).contains(days) else {
+            retentionInputError = "Enter a whole number from 1 to 3,650 days."
+            return
+        }
+
+        retentionInputError = nil
+        if days < settings.transcriptRetentionDays {
+            pendingRetentionDays = days
+            showsRetentionReductionConfirmation = true
+        } else {
+            applyRetentionDays(days)
+        }
+    }
+
+    private func applyRetentionDays(_ days: Int) {
+        settings.transcriptRetentionDays = days
+        retentionDaysInput = String(days)
+        retentionInputError = nil
+        pendingRetentionDays = nil
     }
 
     private var activeSection: Section {
@@ -629,8 +750,8 @@ struct SettingsView: View {
 
     private var zeroRetentionExplanation: String {
         settings.zeroRetention
-            ? "Sends enable_logging=false. If your account rejects it, dictation fails; no silent fallback."
-            : "Ordinary provider retention applies. Account settings and enterprise eligibility have not been verified by this app."
+            ? "Sends enable_logging=false. If your account rejects it, dictation fails; no silent fallback. This provider request does not change local transcript history."
+            : "Ordinary provider retention applies. Account settings and enterprise eligibility have not been verified by this app. Provider retention does not control local transcript history."
     }
 
     private var recordAccent: Color {

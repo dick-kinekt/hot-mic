@@ -35,7 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let settings = DictationSettings()
     private var window: NSWindow?
 
-    lazy var model = TranscriptionCoordinator(settings: settings)
+    lazy var archive = TranscriptArchive(settings: settings)
+    lazy var model = TranscriptionCoordinator(settings: settings, archive: archive)
     lazy var recordingBar = RecordingBarController(model: model, openSetup: { [weak self] in
         self?.showWindow()
     })
@@ -82,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.hidesOnDeactivate = false
             window.tabbingMode = .disallowed
             window.contentView = NSHostingView(
-                rootView: SettingsView(model: model, settings: settings, shortcuts: shortcuts)
+                rootView: SettingsView(model: model, settings: settings, archive: archive, shortcuts: shortcuts)
             )
             window.center()
             window.setFrameAutosaveName("HotMicSettings")
@@ -97,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         shortcuts.shutdown()
         model.cancel()
         recordingBar.shutdown()
+        archive.shutdown()
     }
 }
 

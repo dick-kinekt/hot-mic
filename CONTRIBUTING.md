@@ -15,7 +15,7 @@ The project and scheme are `Dictation`; the app product is **Hot Mic.app**. Keep
 
 - Describe the problem and proposed behavior before broadening scope. Use an issue or discussion for changes that alter the dictation workflow, provider-data boundary, privacy behavior, signing/distribution, or supported macOS versions.
 - Prefer a single purpose per pull request. Include the relevant user-visible behavior, limitations, and documentation changes in the same pull request.
-- Preserve the copy-only model unless the proposal explicitly changes it: Hot Mic does not paste, send Return, or maintain durable transcript history.
+- Preserve the copy-only model unless the proposal explicitly changes it: Hot Mic does not paste or send Return. Local transcript history must respect the configured retention policy and remain separate from provider retention.
 - Reuse native SwiftUI/AppKit and project conventions. Do not add a backend, analytics, plaintext credential storage, or machine-specific tooling for a local convenience.
 - Keep public text free of local paths, private discussion, personal data, and claims of unperformed verification.
 

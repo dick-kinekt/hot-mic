@@ -53,6 +53,7 @@ private final class WorkflowWorld {
     private(set) var microphoneStarts = 0
     var onCredentialLoad: (() -> Void)?
     var copyAction: ((String) -> Bool)?
+    var clock = ContinuousClock.now
 
     init(pasteboardResults: [Bool] = []) {
         self.pasteboardResults = pasteboardResults
@@ -76,7 +77,8 @@ private final class WorkflowWorld {
                 self.copied.append(text)
                 if let copyAction = self.copyAction { return copyAction(text) }
                 return self.pasteboardResults.isEmpty ? true : self.pasteboardResults.removeFirst()
-            }
+            },
+            now: { [self] in clock }
         )
     }
 }
@@ -95,14 +97,18 @@ struct RecordingWorkflowSmoke {
         for _ in 0..<8 { await Task.yield() }
     }
 
-    private static func makeModel(_ world: WorkflowWorld) -> TranscriptionCoordinator {
+    private static func pumpTimer() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+    }
+
+    private static func makeModel(_ world: WorkflowWorld, archive: TranscriptArchive? = nil) -> TranscriptionCoordinator {
         let suite = "RecordingWorkflowSmoke.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.removePersistentDomain(forName: suite)
         let settings = DictationSettings(defaults: defaults)
         settings.privacyReviewed = true
-        return TranscriptionCoordinator(settings: settings, dependencies: world.dependencies())
+        return TranscriptionCoordinator(settings: settings, dependencies: world.dependencies(), archive: archive)
     }
 
     private static func finish(
@@ -121,6 +127,57 @@ struct RecordingWorkflowSmoke {
     }
 
     static func main() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let archiveDefaultsName = "ArchiveWorkflow.\(UUID().uuidString)"
+        let archiveDefaults = UserDefaults(suiteName: archiveDefaultsName)!
+        let archiveSettings = DictationSettings(defaults: archiveDefaults)
+        let archive = TranscriptArchive(settings: archiveSettings, databaseURL: directory.appendingPathComponent("transcripts.sqlite3"))
+        defer {
+            archive.shutdown()
+            try? FileManager.default.removeItem(at: directory)
+            archiveDefaults.removePersistentDomain(forName: archiveDefaultsName)
+        }
+        let archiveWorld = WorkflowWorld()
+        let archiveModel = makeModel(archiveWorld, archive: archive)
+        archiveModel.start()
+        archiveWorld.clients.last!.committed("Stable checkpoint.")
+        archiveWorld.clients.last!.partial("Do not archive this guess.")
+        check(archive.sessions.count == 1, "provider commit was not durably checkpointed")
+        let archiveID = archive.sessions[0].id
+        check(archive.text(for: archiveID) == "Stable checkpoint.", "archive included speculative words")
+        archiveModel.pause()
+        await settle()
+        archiveWorld.clients.last!.succeed("Stable checkpoint.")
+        await settle()
+        await finish(archiveModel, with: "Continued session.", in: archiveWorld)
+        check(archive.sessions.count == 1 && archive.sessions[0].id == archiveID,
+              "Pause/Continue created duplicate sessions")
+        check(archive.text(for: archiveID) == "Stable checkpoint. Continued session.", "archive lost resumed text")
+        archiveModel.reset()
+        await finish(archiveModel, with: "New session after reset.", in: archiveWorld)
+        check(archive.sessions.count == 2, "Reset replaced historical session")
+        archiveModel.togglePresentation()
+        check(archive.sessions.count == 2, "shortcut cancellation erased history")
+
+        let limitWorld = WorkflowWorld()
+        let limitModel = makeModel(limitWorld)
+        limitModel.start()
+        limitWorld.clock = limitWorld.clock.advanced(by: .seconds(86_399))
+        // Drive the real production timer; wall time does not advance by 24 hours.
+        pumpTimer()
+        check(limitModel.capturing, "recording stopped before the 24-hour ceiling")
+        limitWorld.clock = limitWorld.clock.advanced(by: .seconds(1))
+        pumpTimer()
+        check(!limitModel.capturing && limitModel.state == .finalizing, "24-hour cap did not pause capture")
+        await settle()
+        limitWorld.clients.last!.succeed("At the limit.")
+        await settle()
+        check(limitWorld.copied == ["At the limit."], "limit did not finalize and copy")
+        limitModel.start()
+        pumpTimer()
+        check(limitModel.capturing, "Continue did not reset continuous recording ceiling")
+        limitModel.togglePresentation()
+
         let shortcutWorld = WorkflowWorld()
         let shortcutModel = makeModel(shortcutWorld)
         shortcutModel.togglePresentation()

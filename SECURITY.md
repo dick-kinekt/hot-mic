@@ -27,8 +27,11 @@ Use redacted placeholders and synthetic fixtures. If a report needs a request or
 
 Hot Mic captures microphone audio only while recording and sends it directly to
 ElevenLabs. Buffered audio can continue sending during finalization after capture
-stops. The app has no Hot Mic backend, does not create audio files or transcript
-logs, and stores the API key in the macOS Keychain. ElevenLabs account terms,
+stops. The app has no Hot Mic backend and does not create audio files. It stores
+stable transcript text and session metadata in a local SQLite archive with configurable
+retention (14 days by default), and the API key in the macOS Keychain. The archive
+has private filesystem permissions but no application-level encryption. Expiry
+removes records from the app, not external backups or clipboard copies. ElevenLabs account terms,
 charges, retention, training opt-out, and zero-retention eligibility are
 provider-controlled boundaries; see the privacy section of
 [README.md](README.md#privacy-provider-data-and-charges).

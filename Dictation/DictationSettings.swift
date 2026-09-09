@@ -15,6 +15,16 @@ final class DictationSettings: ObservableObject {
     @Published var privacyReviewed: Bool {
         didSet { defaults.set(privacyReviewed, forKey: Storage.privacyGuidanceReviewed) }
     }
+    @Published var transcriptRetentionDays: Int {
+        didSet {
+            let clamped = Self.clampedRetentionDays(transcriptRetentionDays)
+            guard transcriptRetentionDays == clamped else {
+                transcriptRetentionDays = clamped
+                return
+            }
+            defaults.set(transcriptRetentionDays, forKey: Storage.transcriptRetentionDays)
+        }
+    }
 
     private let defaults: UserDefaults
 
@@ -24,7 +34,15 @@ final class DictationSettings: ObservableObject {
         vocabulary = defaults.string(forKey: Storage.vocabulary) ?? ""
         zeroRetention = defaults.object(forKey: Storage.zeroRetention) as? Bool ?? false
         privacyReviewed = defaults.object(forKey: Storage.privacyGuidanceReviewed) as? Bool ?? false
+        transcriptRetentionDays = Self.clampedRetentionDays(
+            defaults.object(forKey: Storage.transcriptRetentionDays) as? Int ?? Self.defaultTranscriptRetentionDays
+        )
+        if defaults.object(forKey: Storage.transcriptRetentionDays) == nil
+            || defaults.integer(forKey: Storage.transcriptRetentionDays) != transcriptRetentionDays {
+            defaults.set(transcriptRetentionDays, forKey: Storage.transcriptRetentionDays)
+        }
     }
+
 
     var keyterms: [String] {
         vocabulary.split(whereSeparator: \.isNewline)
@@ -44,10 +62,17 @@ final class DictationSettings: ObservableObject {
         )
     }
 
+    static let defaultTranscriptRetentionDays = 14
+
+    static func clampedRetentionDays(_ days: Int) -> Int {
+        min(max(days, 1), 3_650)
+    }
+
     private enum Storage {
         static let language = "dictation.language"
         static let vocabulary = "dictation.vocabulary"
         static let zeroRetention = "dictation.zeroRetention"
         static let privacyGuidanceReviewed = "privacyGuidanceReviewed"
+        static let transcriptRetentionDays = "dictation.transcriptRetentionDays"
     }
 }
