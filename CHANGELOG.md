@@ -8,7 +8,7 @@
 - Locked Pixi release tooling and a one-command release cut that bumps metadata and changelog, atomically pushes the release commit and tag, and waits for publication.
 - Pinned workflow checkouts to the triggering commit and rechecked the remote tag before publishing its artifacts.
 
-## 1.0 — Initial public source version
+## 0.0.0 — Initial public source version
 
 - Native Hot Mic app with Dock, menu-bar and reusable settings-window access.
 - General, Speech, Privacy and Session settings; original icon and installer artwork.
