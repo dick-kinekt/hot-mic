@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0 — 2026-09-09
+
 - Tagged and manually triggered releases with version-checked source archives, universal ad-hoc-signed DMGs, and SHA-256 checksums for both assets.
 - GitHub Actions builds the app from the source archive and verifies the DMG before publication; pull requests and manual dry runs retain downloadable build artifacts without publishing.
 - Clarified the Swift 6.2 / Xcode 26 build requirement imposed by the pinned `KeyboardShortcuts` dependency.
