@@ -29,19 +29,32 @@ struct TranscriptionCoordinatorDependencies {
     let loadCredential: () throws -> String?
     let saveCredential: (String) throws -> Void
     let deleteCredential: () throws -> Void
+    let loadCleanupCredential: () throws -> String?
+    let saveCleanupCredential: (String) throws -> Void
+    let deleteCleanupCredential: () throws -> Void
     let microphoneAuthorized: () -> Bool
     let requestMicrophone: () async -> Bool
     let makeCapture: () -> any TranscriptionAudioCapturing
     let makeClient: (@escaping @MainActor (RealtimeEvent) -> Void) -> any TranscriptionRealtimeSession
     let copyToPasteboard: (String) -> Bool
     var now: () -> ContinuousClock.Instant = { .now }
+    var waitForCloseConfirmation: @MainActor () async throws -> Void = {
+        try await Task.sleep(for: .milliseconds(600))
+    }
+    var cleanTranscript: @MainActor (String, String) async throws -> String = { text, apiKey in
+        try await OpenAITextCleaner().clean(text, apiKey: apiKey)
+    }
 
     static func live() -> Self {
         let credentials = CredentialStore()
+        let cleanupCredentials = CredentialStore(service: "local.Dictation.openai")
         return Self(
             loadCredential: { try credentials.load() },
             saveCredential: { try credentials.save($0) },
             deleteCredential: { try credentials.delete() },
+            loadCleanupCredential: { try cleanupCredentials.load() },
+            saveCleanupCredential: { try cleanupCredentials.save($0) },
+            deleteCleanupCredential: { try cleanupCredentials.delete() },
             microphoneAuthorized: {
                 AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
             },
@@ -65,7 +78,7 @@ final class TranscriptionCoordinator: ObservableObject {
         case starting = "Recording · connecting"
         case recording = "Recording"
         case finalizing = "Processing · microphone off"
-        case paused = "Paused"
+        case paused = "Stopped"
     }
 
     @Published private(set) var state: State = .idle
@@ -73,6 +86,9 @@ final class TranscriptionCoordinator: ObservableObject {
     @Published private(set) var transcript = ""
     @Published private(set) var previewTranscript = ""
     @Published private(set) var hasKey = false
+    @Published private(set) var hasCleanupKey = false
+    @Published private(set) var cleanupCredentialNotice: String?
+    @Published private(set) var cleanupCredentialError = false
     @Published private(set) var microphoneAllowed = false
     @Published private(set) var recordingSeconds: Double = 0
     @Published private(set) var microphoneStartMS: Double?
@@ -84,6 +100,10 @@ final class TranscriptionCoordinator: ObservableObject {
     @Published private(set) var isPresented = false
     @Published private(set) var isClosing = false
     @Published private(set) var copySucceeded = false
+    @Published private(set) var isShowingCopyConfirmation = false
+    @Published private(set) var isCleaningText = false
+    @Published private(set) var canUndoCleanup = false
+    @Published private(set) var cleanupNotice: String?
 
     private let settings: DictationSettings
     private let dependencies: TranscriptionCoordinatorDependencies
@@ -96,6 +116,11 @@ final class TranscriptionCoordinator: ObservableObject {
     private var streamID: UUID?
     private var poller: Timer?
     private var finishTask: Task<Void, Never>?
+    private var closeConfirmationTask: Task<Void, Never>?
+    private var confirmationGeneration: UInt64 = 0
+    private var cleanupTask: Task<Void, Never>?
+    private var cleanupGeneration: UInt64 = 0
+    private var originalSegments: [String]?
     private var segmentRequestedAt = ContinuousClock.now
     private var activeRecordingBeganAt: ContinuousClock.Instant?
     private var finalizationBeganAt: ContinuousClock.Instant?
@@ -115,6 +140,10 @@ final class TranscriptionCoordinator: ObservableObject {
 
     var capturing: Bool { capture?.isCapturing == true }
 
+    var canCleanText: Bool {
+        hasCleanupKey && isPresented && state == .paused && !transcript.isEmpty && !isClosing && !isCleaningText
+    }
+
     convenience init(settings: DictationSettings, archive: TranscriptArchive) {
         self.init(settings: settings, dependencies: .live(), archive: archive)
     }
@@ -130,6 +159,11 @@ final class TranscriptionCoordinator: ObservableObject {
         refreshPermissions()
         do { hasKey = try dependencies.loadCredential() != nil }
         catch { notice = error.localizedDescription; isError = true }
+        do { hasCleanupKey = try dependencies.loadCleanupCredential() != nil }
+        catch {
+            cleanupCredentialNotice = error.localizedDescription
+            cleanupCredentialError = true
+        }
 
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(
@@ -138,7 +172,7 @@ final class TranscriptionCoordinator: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
-                    self?.cancel(reason: "Recording paused because the Mac is sleeping or the session is inactive.")
+                    self?.cancel(reason: "Recording stopped because the Mac is sleeping or the session is inactive.")
                 }
             })
         }
@@ -186,9 +220,37 @@ final class TranscriptionCoordinator: ObservableObject {
         }
     }
 
+    func saveCleanupKey(_ key: String) -> Bool {
+        guard !active, !isClosing, !isCleaningText else { return false }
+        do {
+            try dependencies.saveCleanupCredential(key)
+            hasCleanupKey = true
+            cleanupCredentialNotice = "OpenAI key saved in Keychain. Clean up text sends the stopped transcript to OpenAI."
+            cleanupCredentialError = false
+            return true
+        } catch {
+            cleanupCredentialNotice = error.localizedDescription
+            cleanupCredentialError = true
+            return false
+        }
+    }
+
+    func deleteCleanupKey() {
+        guard !active, !isClosing, !isCleaningText else { return }
+        do {
+            try dependencies.deleteCleanupCredential()
+            hasCleanupKey = false
+            cleanupCredentialNotice = "OpenAI key removed. Recording and Undo remain available."
+            cleanupCredentialError = false
+        } catch {
+            cleanupCredentialNotice = error.localizedDescription
+            cleanupCredentialError = true
+        }
+    }
+
     /// Starts a new visible dictation, or a new stream within the visible paused dictation.
     func start() {
-        guard !active else { return }
+        guard !active, !isClosing else { return }
 
         if !isPresented {
             beginNewDictation()
@@ -196,18 +258,26 @@ final class TranscriptionCoordinator: ObservableObject {
             guard state == .paused else { return }
         }
 
+        invalidateCleanup(clearUndo: true)
         beginStream()
     }
 
-    /// The global shortcut starts when hidden, or discards and dismisses when visible.
+    /// The global shortcut starts when hidden, or finishes, copies, and closes when visible.
     func togglePresentation() {
+        guard !isClosing else { return }
         if isPresented {
-            reset()
-            dismissDictation()
-            notice = "Dictation canceled. Microphone and connection are off."
+            close()
         } else {
             start()
         }
+    }
+
+    func discardAndDismiss() {
+        invalidateCloseConfirmation()
+        invalidateCleanup(clearUndo: true)
+        reset()
+        dismissDictation()
+        notice = "Dictation canceled. Microphone and connection are off."
     }
 
     /// Pauses an active stream, or continues the visible paused dictation.
@@ -230,6 +300,8 @@ final class TranscriptionCoordinator: ObservableObject {
 
     /// Finalizes and copies before dismissal when there is an active stream.
     func close() {
+        guard !isClosing else { return }
+        invalidateCleanup(clearUndo: true)
         switch state {
         case .starting, .recording:
             isClosing = true
@@ -247,6 +319,8 @@ final class TranscriptionCoordinator: ObservableObject {
     }
 
     func cancel(reason: String = "Dictation canceled. Microphone and connection are off.") {
+        invalidateCloseConfirmation()
+        invalidateCleanup(clearUndo: true)
         guard active else { return }
 
         let recovered = commitCurrentPartialText()
@@ -263,15 +337,19 @@ final class TranscriptionCoordinator: ObservableObject {
     /// Discards the visible dictation without copying and leaves the bar ready for a fresh stream.
     func reset() {
         guard isPresented else { return }
+        invalidateCloseConfirmation()
+        invalidateCleanup(clearUndo: true)
 
         checkpointArchive(incomplete: active || hasIncompleteText)
         releaseCurrentStream(cancelClient: true, cancelFinishTask: true)
         beginNewDictation()
-        notice = "Ready to continue dictation."
+        notice = "Ready to start dictation."
     }
 
     func clearResult() {
         guard !active else { return }
+        invalidateCloseConfirmation()
+        invalidateCleanup(clearUndo: true)
         checkpointArchive(incomplete: hasIncompleteText)
         archiveID = UUID()
         archiveStartedAt = Date()
@@ -287,6 +365,8 @@ final class TranscriptionCoordinator: ObservableObject {
     }
 
     func copyResult() {
+        guard !isShowingCopyConfirmation else { return }
+        invalidateCleanup(clearUndo: false)
         guard !transcript.isEmpty else { return }
 
         if dependencies.copyToPasteboard(transcript) {
@@ -298,16 +378,110 @@ final class TranscriptionCoordinator: ObservableObject {
             if archiveSaveFailed {
                 notice += " Saving to Transcripts failed; keep this copy and check Settings."
             }
-            if isClosing, state == .paused { dismissDictation() }
+            if isClosing, state == .paused { showCloseConfirmation() }
         } else {
             copySucceeded = false
-            isClosing = false
+            invalidateCloseConfirmation()
             isError = true
             notice = "Clipboard write failed. Retry Copy, or open Setup to select and copy the text manually."
         }
     }
 
+    func cleanUpText() {
+        guard canCleanText else { return }
+        invalidateCleanup(clearUndo: false)
+        let generation = cleanupGeneration
+        let id = archiveID
+        let originalText = transcript
+        isCleaningText = true
+        isError = false
+        cleanupTask = Task { [weak self, dependencies] in
+            do {
+                let key = try dependencies.loadCleanupCredential()
+                // A Keychain prompt may re-enter the run loop before the request starts.
+                guard !Task.isCancelled, let self,
+                      self.ownsCleanup(generation, session: id, text: originalText) else { return }
+                guard let key, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    self.hasCleanupKey = false
+                    self.cleanupTask = nil
+                    self.isCleaningText = false
+                    self.isError = true
+                    self.notice = "Save an OpenAI key in Settings → General before cleaning. Original text kept."
+                    return
+                }
+                let cleaned = try await dependencies.cleanTranscript(originalText, key)
+                guard !Task.isCancelled,
+                      self.ownsCleanup(generation, session: id, text: originalText) else { return }
+                self.cleanupTask = nil
+                self.isCleaningText = false
+                guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    self.cleanupNotice = self.archiveSaveFailed
+                        ? "No text returned; original kept · archive save failed"
+                        : "No text returned; original kept"
+                    return
+                }
+                if cleaned == originalText {
+                    self.copyResult()
+                    self.setCleanupCopyNotice("Already clean · copied")
+                    return
+                }
+                self.originalSegments = self.completedSegments
+                self.completedSegments = [cleaned]
+                self.refreshTranscript()
+                self.checkpointArchive(incomplete: self.hasIncompleteText)
+                self.copySucceeded = false
+                self.canUndoCleanup = true
+                self.copyResult()
+                self.setCleanupCopyNotice("Cleaned & copied")
+            } catch {
+                guard !Task.isCancelled, let self,
+                      self.ownsCleanup(generation, session: id, text: originalText) else { return }
+                self.cleanupTask = nil
+                self.isCleaningText = false
+                self.isError = true
+                self.notice = "Cleanup failed; original text kept. " + error.localizedDescription
+            }
+        }
+    }
+
+    private func ownsCleanup(_ generation: UInt64, session: UUID, text: String) -> Bool {
+        cleanupGeneration == generation && archiveID == session && transcript == text
+            && isPresented && state == .paused && !isClosing
+    }
+
+    func undoCleanup() {
+        guard isPresented, state == .paused, !isClosing, !isCleaningText,
+              let originalSegments else { return }
+        completedSegments = originalSegments
+        refreshTranscript()
+        checkpointArchive(incomplete: hasIncompleteText)
+        invalidateCleanup(clearUndo: true)
+        copySucceeded = false
+        copyResult()
+        setCleanupCopyNotice("Original restored & copied")
+    }
+
+    private func setCleanupCopyNotice(_ success: String) {
+        cleanupNotice = copySucceeded
+            ? (archiveSaveFailed ? "Copied · archive save failed" : success)
+            : nil
+    }
+
+    private func invalidateCleanup(clearUndo: Bool) {
+        cleanupGeneration &+= 1
+        cleanupTask?.cancel()
+        cleanupTask = nil
+        isCleaningText = false
+        cleanupNotice = nil
+        if clearUndo {
+            originalSegments = nil
+            canUndoCleanup = false
+        }
+    }
+
     private func beginNewDictation() {
+        invalidateCloseConfirmation()
+        invalidateCleanup(clearUndo: true)
         archiveID = UUID()
         archiveStartedAt = Date()
         archiveSaveFailed = false
@@ -422,7 +596,7 @@ final class TranscriptionCoordinator: ObservableObject {
             connectionMS = milliseconds(since: segmentRequestedAt)
             if state == .starting { state = .recording }
             if state == .recording {
-                notice = "Recording to ElevenLabs. Pause when you want to review this segment."
+                notice = "Recording to ElevenLabs. Use Pause & copy when you want to review this segment."
             }
         case .partial(let text):
             let provisional = normalized(text)
@@ -543,7 +717,7 @@ final class TranscriptionCoordinator: ObservableObject {
         releaseCurrentStream(cancelClient: true, cancelFinishTask: true)
         state = isPresented ? .paused : .idle
         isError = false
-        notice = "Paused before recording started. Continue when you are ready."
+        notice = "Stopped before recording started. Start when you are ready."
     }
 
     private func startupFailure(_ message: String, streamID id: UUID? = nil) {
@@ -584,7 +758,7 @@ final class TranscriptionCoordinator: ObservableObject {
 
     private func closePausedDictation() {
         guard state == .paused else { return }
-        if transcript.isEmpty || copySucceeded {
+        if transcript.isEmpty {
             dismissDictation()
         } else {
             copyResult()
@@ -593,9 +767,40 @@ final class TranscriptionCoordinator: ObservableObject {
 
     private func dismissDictation() {
         guard !active else { return }
+        invalidateCloseConfirmation()
+        invalidateCleanup(clearUndo: true)
         isPresented = false
         isClosing = false
         state = .idle
+    }
+
+    private func invalidateCloseConfirmation() {
+        confirmationGeneration &+= 1
+        closeConfirmationTask?.cancel()
+        closeConfirmationTask = nil
+        isShowingCopyConfirmation = false
+        isClosing = false
+    }
+
+    private func showCloseConfirmation() {
+        guard closeConfirmationTask == nil else { return }
+        confirmationGeneration &+= 1
+        let generation = confirmationGeneration
+        let id = archiveID
+        isShowingCopyConfirmation = true
+        closeConfirmationTask = Task { [weak self, dependencies] in
+            do { try await dependencies.waitForCloseConfirmation() }
+            catch {
+                guard let self, self.confirmationGeneration == generation else { return }
+                self.invalidateCloseConfirmation()
+                return
+            }
+            guard !Task.isCancelled, let self,
+                  self.confirmationGeneration == generation, self.archiveID == id,
+                  self.isPresented, self.isClosing, self.state == .paused,
+                  self.copySucceeded else { return }
+            self.dismissDictation()
+        }
     }
 
     private func releaseCurrentStream(cancelClient: Bool, cancelFinishTask: Bool) {

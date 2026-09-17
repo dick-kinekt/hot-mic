@@ -45,6 +45,7 @@ struct SettingsView: View {
 
     private enum FocusedField: Hashable {
         case apiKey
+        case cleanupAPIKey
     }
 
     @ObservedObject var model: TranscriptionCoordinator
@@ -54,8 +55,10 @@ struct SettingsView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var apiKey = ""
+    @State private var cleanupAPIKey = ""
     @State private var selectedSection: Section?
     @State private var showsRemoveKeyConfirmation = false
+    @State private var showsRemoveCleanupKeyConfirmation = false
     @State private var retentionDaysInput: String
     @State private var retentionInputError: String?
     @State private var pendingRetentionDays: Int?
@@ -63,6 +66,7 @@ struct SettingsView: View {
     @FocusState private var focusedField: FocusedField?
 
     private static let privacyGuidanceURL = URL(string: "https://elevenlabs.io/docs/help-center/legal/is-my-data-used-to-improve-eleven-labs-ai-models")!
+    private static let openAIDataUsageURL = URL(string: "https://openai.com/policies/api-data-usage-policies/")!
 
     init(
         model: TranscriptionCoordinator,
@@ -100,6 +104,20 @@ struct SettingsView: View {
             Text("This removes the ElevenLabs API key from macOS Keychain. You will need to enter it again before recording.")
         }
         .confirmationDialog(
+            "Remove saved OpenAI API key?",
+            isPresented: $showsRemoveCleanupKeyConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Key", role: .destructive) {
+                cleanupAPIKey = ""
+                focusedField = nil
+                model.deleteCleanupKey()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the OpenAI API key from macOS Keychain. Clean up text will be unavailable until you add another key.")
+        }
+        .confirmationDialog(
             "Reduce transcript retention?",
             isPresented: $showsRetentionReductionConfirmation,
             titleVisibility: .visible
@@ -127,10 +145,12 @@ struct SettingsView: View {
         }
         .onDisappear {
             apiKey = ""
+            cleanupAPIKey = ""
             focusedField = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { _ in
             apiKey = ""
+            cleanupAPIKey = ""
             focusedField = nil
         }
     }
@@ -269,7 +289,7 @@ struct SettingsView: View {
                         Text("Use your shortcut from any app.")
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Button(model.isPresented ? "Open Session" : "Start Dictation") {
+                        Button(model.isPresented ? "Open session" : "Start dictation") {
                             if model.isPresented { selectedSection = .session } else { model.start() }
                         }
                         .buttonStyle(.borderedProminent)
@@ -389,6 +409,58 @@ struct SettingsView: View {
                 .disabled(model.active)
             }
 
+            SettingsCard("OpenAI text cleanup", detail: "Optional. Clean only the current stopped transcript when you explicitly click Clean up text.") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        SecureField(
+                            model.hasCleanupKey ? "Replace saved OpenAI API key" : "OpenAI API key",
+                            text: $cleanupAPIKey
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.password)
+                        .privacySensitive()
+                        .focused($focusedField, equals: .cleanupAPIKey)
+                        .accessibilityIdentifier("cleanup-api-key")
+                        .accessibilityLabel(model.hasCleanupKey ? "Replacement OpenAI API key" : "OpenAI API key")
+                        .onSubmit(saveCleanupKey)
+
+                        Button(model.hasCleanupKey ? "Replace Key" : "Save Key", action: saveCleanupKey)
+                            .buttonStyle(.borderedProminent)
+                            .tint(recordAccent)
+                            .disabled(cleanupKeyMutationDisabled || cleanupAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .disabled(cleanupKeyMutationDisabled)
+
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(model.hasCleanupKey ? "An OpenAI API key is stored in macOS Keychain." : "No OpenAI API key saved. Add one only if you want cloud text cleanup.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Spacer(minLength: 12)
+
+                        if model.hasCleanupKey {
+                            Button("Remove Key") {
+                                showsRemoveCleanupKeyConfirmation = true
+                            }
+                            .foregroundStyle(.red)
+                            .disabled(cleanupKeyMutationDisabled)
+                        }
+                    }
+
+                    if let notice = model.cleanupCredentialNotice {
+                        Label(notice, systemImage: model.cleanupCredentialError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(model.cleanupCredentialError ? Color.red : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Text("Uses OpenAI GPT-5.6 Terra over the internet and may incur OpenAI usage charges. It is intended to preserve meaning, but the result is not guaranteed. Undo restores and copies the original until Resume, Reset, Clear, or Close.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             SettingsCard("Microphone") {
                 HStack(alignment: .center, spacing: 12) {
                     Image(systemName: model.microphoneAllowed ? "checkmark.circle.fill" : "mic.slash")
@@ -429,7 +501,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    Text("Press once to start; press again to cancel and dismiss. Releasing the keys does not stop recording. Use Pause or Close in the bar to finish and copy instead.")
+                    Text("Press once to start; press again to finish, copy, and close. Releasing the keys does not stop recording. Pause & copy keeps the bar open so you can resume.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -513,7 +585,22 @@ struct SettingsView: View {
                 .disabled(model.active)
             }
 
-            SettingsCard("Retention request") {
+            SettingsCard("OpenAI text cleanup") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Only when you explicitly click Clean up text, Hot Mic sends the current stopped transcript to OpenAI for cleanup. Recording does not use OpenAI and is ready without an OpenAI key.")
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("The request uses store:false, which does not mean zero retention. OpenAI says API data is not used to train models by default, but abuse-monitoring logs may be retained for up to 30 days.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Link("Read OpenAI API data usage policies", destination: Self.openAIDataUsageURL)
+                        .font(.callout.weight(.medium))
+                }
+            }
+
+            SettingsCard("ElevenLabs retention request") {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("Request zero retention (eligible enterprise accounts only)", isOn: $settings.zeroRetention)
                         .toggleStyle(.switch)
@@ -582,15 +669,15 @@ struct SettingsView: View {
             SettingsCard("Recording") {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(alignment: .center, spacing: 12) {
-                        Image(systemName: model.capturing ? "mic.fill" : "mic")
+                        Image(systemName: model.isShowingCopyConfirmation ? "checkmark" : model.capturing ? "mic.fill" : "mic")
                             .foregroundStyle(model.capturing ? recordAccent : Color.secondary)
                             .font(.title3)
                             .accessibilityHidden(true)
 
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(model.state.rawValue)
+                            Text(model.isShowingCopyConfirmation ? "Copied" : model.state.rawValue)
                                 .font(.body.weight(.semibold))
-                            Text(model.capturing ? "Microphone on" : "Microphone off")
+                            Text(model.isShowingCopyConfirmation ? "Closing…" : model.capturing ? "Microphone on" : "Microphone off")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -605,22 +692,27 @@ struct SettingsView: View {
 
                     HStack(spacing: 9) {
                         if model.state == .starting || model.state == .recording {
-                            Button("Pause & Copy", action: model.pause)
+                            Button("Pause & copy", action: model.pause)
                                 .buttonStyle(.borderedProminent)
                                 .tint(recordAccent)
+                                .disabled(model.isClosing)
                         } else if model.state != .finalizing {
-                            Button(model.isPresented ? "Continue Dictation" : "Start Dictation", action: model.start)
+                            Button(model.isPresented && (!model.transcript.isEmpty || model.recordingSeconds > 0)
+                                   ? "Resume" : "Start dictation", action: model.start)
                                 .buttonStyle(.borderedProminent)
                                 .tint(recordAccent)
-                                .disabled(!canStart)
+                                .disabled(!canStart || model.isClosing)
                         }
 
                         if model.isPresented {
-                            Button("Finish & Close", action: model.close)
+                            Button("Copy & close", action: model.close)
                                 .disabled(model.isClosing)
                         }
 
-                        if model.isClosing || model.state == .finalizing {
+                        if model.isShowingCopyConfirmation {
+                            Image(systemName: "checkmark")
+                                .accessibilityLabel("Copied")
+                        } else if model.isClosing || model.state == .finalizing {
                             ProgressView()
                                 .controlSize(.small)
                                 .accessibilityLabel("Finishing dictation")
@@ -644,9 +736,9 @@ struct SettingsView: View {
             }
 
 
-            SettingsCard("Current dictation", detail: "Stable committed text is retained in Transcripts.") {
+            SettingsCard("Current dictation", detail: "Stable text is saved in Transcripts. Clean up text sends this stopped session to OpenAI.") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(model.transcript.isEmpty ? "Completed text appears here after you pause. Continue appends to this dictation; stable committed text is archived separately." : model.transcript)
+                    Text(model.transcript.isEmpty ? "Completed text appears here after Pause & copy. Resume appends to this dictation; Clean up text in the bar sends the stopped session to OpenAI, updates the saved session, and copies it." : model.transcript)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, minHeight: 110, alignment: .topLeading)
                         .padding(10)
@@ -654,10 +746,10 @@ struct SettingsView: View {
                         .accessibilityLabel("Current dictation result")
 
                     HStack(spacing: 9) {
-                        Button("Copy Result", action: model.copyResult)
-                            .disabled(model.transcript.isEmpty)
+                        Button("Copy text", action: model.copyResult)
+                            .disabled(model.transcript.isEmpty || model.isClosing)
 
-                        Button("Clear Result", role: .destructive, action: model.clearResult)
+                        Button("Clear result", role: .destructive, action: model.clearResult)
                             .disabled(model.active || model.transcript.isEmpty)
 
                         Spacer(minLength: 12)
@@ -669,7 +761,7 @@ struct SettingsView: View {
                         }
                     }
 
-                    Text("Pausing copies the complete dictation to your clipboard. Closing while recording finishes and copies before dismissing. Resetting or cancelling clears the live session, but keeps already archived stable text; provisional hypotheses are never retained. No automatic paste or Return is sent; clipboard managers may retain copied text.")
+                    Text("Pause & copy copies the complete dictation and keeps the bar open for Resume. The blue overlapping-documents button copies it again; the Copied status confirms success. Copy & close and the shortcut finish, copy, briefly confirm, and dismiss. Clean up text sends only this current stopped transcript to OpenAI, then edits the saved session and copies it. It requires an OpenAI key and internet, is intended to preserve meaning but is not guaranteed, and Undo is available until Resume, Reset, Clear, or Close. Reset and Cancel discard the live session but keep archived stable text. Closing Settings does not stop recording. No automatic paste or Return is sent; clipboard managers may retain copied text.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -677,7 +769,7 @@ struct SettingsView: View {
             }
             DisclosureGroup("Performance details") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Each recording segment pauses automatically after 24 hours. Paused time is not recorded. Short final segments are padded with silence for provider processing after the microphone is off.")
+                    Text("Each recording segment stops automatically after 24 hours. Stopped time is not recorded. Short final segments are padded with silence for provider processing after the microphone is off.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -750,8 +842,12 @@ struct SettingsView: View {
 
     private var zeroRetentionExplanation: String {
         settings.zeroRetention
-            ? "Sends enable_logging=false. If your account rejects it, dictation fails; no silent fallback. This provider request does not change local transcript history."
-            : "Ordinary provider retention applies. Account settings and enterprise eligibility have not been verified by this app. Provider retention does not control local transcript history."
+            ? "Sends enable_logging=false to ElevenLabs. If your account rejects it, dictation fails; no silent fallback. This setting does not affect OpenAI retention or local transcript history."
+            : "Ordinary ElevenLabs retention applies. Account settings and enterprise eligibility have not been verified by this app. This setting does not affect OpenAI retention or local transcript history."
+    }
+
+    private var cleanupKeyMutationDisabled: Bool {
+        model.active || model.isClosing || model.isCleaningText
     }
 
     private var recordAccent: Color {
@@ -780,6 +876,15 @@ struct SettingsView: View {
         guard !model.active, !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if model.saveKey(apiKey) {
             apiKey = ""
+            focusedField = nil
+        }
+    }
+
+    private func saveCleanupKey() {
+        guard !cleanupKeyMutationDisabled,
+              !cleanupAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if model.saveCleanupKey(cleanupAPIKey) {
+            cleanupAPIKey = ""
             focusedField = nil
         }
     }

@@ -48,7 +48,7 @@ struct RecordingBarView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             MicrophoneIndicator(
                 isCapturing: model.capturing,
                 isError: model.isError,
@@ -87,12 +87,23 @@ struct RecordingBarView: View {
 
             primaryAction
 
+            Button(action: model.copyResult) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 32, height: 36)
+            }
+            .buttonStyle(RecordingBarIconButtonStyle(tint: Color(nsColor: .systemBlue)))
+            .disabled(model.active || model.transcript.isEmpty || model.isClosing)
+            .help(model.copySucceeded ? "Copied to clipboard. Click to copy again." : "Copy text to clipboard")
+            .accessibilityLabel("Copy text")
+            .accessibilityValue(model.copySucceeded ? "Copied" : "Not copied")
+
             Button(action: model.reset) {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.system(size: 12, weight: .semibold))
                     .frame(width: 30, height: 36)
             }
-            .buttonStyle(RecordingBarIconButtonStyle())
+            .buttonStyle(RecordingBarIconButtonStyle(tint: Color(nsColor: .systemOrange)))
             .help("Discard this dictation and reset the timer")
             .accessibilityLabel("Reset dictation")
 
@@ -101,7 +112,7 @@ struct RecordingBarView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .frame(width: 36, height: 36)
             }
-            .buttonStyle(RecordingBarIconButtonStyle())
+            .buttonStyle(RecordingBarIconButtonStyle(hoverTint: Color(nsColor: .systemRed)))
             .disabled(model.isClosing)
             .help(model.isClosing ? "Closing after dictation is safely copied" : "Close dictation")
             .accessibilityLabel(model.isClosing ? "Closing dictation" : "Close dictation")
@@ -110,7 +121,7 @@ struct RecordingBarView: View {
 
     private var primaryAction: some View {
         Button(action: model.toggleRecording) {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 if showsProgress {
                     ProgressView()
                         .controlSize(.mini)
@@ -120,9 +131,11 @@ struct RecordingBarView: View {
                         .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
                 }
                 Text(primaryActionTitle)
+                    .fixedSize(horizontal: true, vertical: false)
                     .contentTransition(.opacity)
             }
-            .frame(width: 78)
+            .lineLimit(1)
+            .frame(width: 84)
         }
         .buttonStyle(RecordingBarPrimaryButtonStyle())
         .disabled(primaryActionDisabled)
@@ -181,6 +194,7 @@ struct RecordingBarView: View {
     }
 
     private var statusTitle: String {
+        if model.isShowingCopyConfirmation { return "Copied" }
         switch visualState {
         case .error:
             return "Needs attention"
@@ -195,11 +209,13 @@ struct RecordingBarView: View {
         case .finalizing:
             return "Finishing up"
         case .paused:
-            return "Paused"
+            if isEmptySession { return "Ready to dictate" }
+            return model.copySucceeded ? "Copied" : "Stopped"
         }
     }
 
     private var statusDetail: String {
+        if model.isShowingCopyConfirmation { return "Closing…" }
         if model.isError { return "Review the message below" }
         if model.isClosing { return "Finishing and copying your text" }
 
@@ -213,23 +229,26 @@ struct RecordingBarView: View {
         case .finalizing:
             return "Microphone off · finishing text"
         case .paused:
-            if model.transcript.isEmpty { return "Ready to continue" }
-            return model.copySucceeded ? "Copied · ready to paste" : "Paused · copy before pasting"
+            if model.isCleaningText { return "Cleaning with OpenAI…" }
+            if let notice = model.cleanupNotice { return notice }
+            return isEmptySession ? "Ready to start" : "Ready to resume"
         }
     }
 
     private var primaryActionTitle: String {
+        if model.isShowingCopyConfirmation { return "Copied" }
         switch model.state {
         case .starting, .recording:
-            return "Pause"
+            return "Pause & copy"
         case .idle, .paused:
-            return "Continue"
+            return isEmptySession ? "Start" : "Resume"
         case .finalizing:
             return "Finishing"
         }
     }
 
     private var primaryActionSymbol: String {
+        if model.isShowingCopyConfirmation { return "checkmark" }
         switch model.state {
         case .starting, .recording:
             return "pause.fill"
@@ -241,11 +260,12 @@ struct RecordingBarView: View {
     }
 
     private var primaryActionHelp: String {
+        if model.isShowingCopyConfirmation { return "Copied; closing dictation" }
         switch model.state {
         case .starting, .recording:
             return "Pause recording and copy the finished dictation"
         case .idle, .paused:
-            return "Continue dictation"
+            return isEmptySession ? "Start dictation" : "Resume this dictation"
         case .finalizing:
             return "Dictation is still finalizing"
         }
@@ -257,7 +277,11 @@ struct RecordingBarView: View {
 
 
     private var showsProgress: Bool {
-        model.state == .finalizing || model.isClosing
+        !model.isShowingCopyConfirmation && (model.state == .finalizing || model.isClosing)
+    }
+
+    private var isEmptySession: Bool {
+        model.transcript.isEmpty && model.recordingSeconds == 0
     }
 
     private var shouldShowElapsedTime: Bool {
@@ -307,6 +331,30 @@ private struct RecordingTranscriptPreview: View {
                         }
 
                         Button {
+                            if model.canUndoCleanup { model.undoCleanup() }
+                            else { model.cleanUpText() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                if model.isCleaningText {
+                                    ProgressView().controlSize(.mini)
+                                    Text("Cleaning with OpenAI…")
+                                } else {
+                                    Image(systemName: model.canUndoCleanup ? "arrow.uturn.backward" : "sparkles")
+                                        .foregroundStyle(cleanupActionAvailable ? Color(nsColor: .systemPurple) : Color.secondary)
+                                    Text(model.canUndoCleanup ? "Undo cleanup" : "Clean up text")
+                                }
+                            }
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
+                            .frame(minHeight: 24)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(cleanupActionAvailable ? Color.primary : Color.secondary)
+                        .disabled(!cleanupActionAvailable)
+                        .help(cleanupHelp)
+
+                        Button {
                             isExpanded.toggle()
                         } label: {
                             Label(isExpanded ? "Collapse" : "Expand",
@@ -345,7 +393,8 @@ private struct RecordingTranscriptPreview: View {
     }
 
     private var transcriptText: some View {
-        Text(model.previewTranscript.isEmpty ? emptyText : model.previewTranscript)
+        // Only the latest two lines are visible. Do not lay out an entire day-long session.
+        Text(model.previewTranscript.isEmpty ? emptyText : String(model.previewTranscript.suffix(4_096)))
             .font(.system(size: 13))
             .lineSpacing(4)
             .foregroundStyle(model.previewTranscript.isEmpty ? .secondary : .primary)
@@ -354,12 +403,35 @@ private struct RecordingTranscriptPreview: View {
             .transaction { $0.animation = nil }
     }
 
+    private var cleanupHelp: String {
+        if model.isCleaningText {
+            return "Cleaning the current stopped transcript with OpenAI."
+        }
+        if model.canUndoCleanup {
+            return "Restore and copy the original text. Available until Resume, Reset, Clear, or Close. Undo does not require an OpenAI key."
+        }
+        if !model.hasCleanupKey {
+            return "Add an OpenAI API key in Settings → General before cleaning."
+        }
+        if model.active {
+            return "Pause & copy before cleaning the text."
+        }
+        if model.isClosing {
+            return "Cleanup is unavailable while dictation is closing."
+        }
+        return "Send the current stopped transcript to OpenAI for cleanup, update this saved session, and copy it. Internet and OpenAI usage charges apply."
+    }
+
+    private var cleanupActionAvailable: Bool {
+        !model.isCleaningText && (model.canUndoCleanup || model.canCleanText)
+    }
+
     private var emptyText: String {
         switch model.state {
         case .starting: "Connecting… Your words will appear here."
         case .recording: "Listening… Your words will appear here."
         case .finalizing: "Finishing transcription…"
-        case .idle, .paused: "No speech recognized yet."
+        case .idle, .paused: "Use Start or Resume to dictate, then Pause & copy."
         }
     }
 }
@@ -736,18 +808,18 @@ private struct RecordingBarPrimaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
-            .padding(.horizontal, 12)
-            .frame(minHeight: 38)
+            .padding(.horizontal, 6)
+            .frame(minHeight: 32)
             .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill((colorScheme == .dark ? Color.white : Color.black)
                         .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.35))
             }
             .scaleEffect(configuration.isPressed && isEnabled && !reduceMotion ? 0.97 : 1)
             .animation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.85), value: configuration.isPressed)
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -771,15 +843,25 @@ private struct RecordingBarSecondaryButtonStyle: ButtonStyle {
 
 private struct RecordingBarIconButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    var tint: Color = .secondary
+    var hoverTint: Color?
+    @State private var isHovered = false
+
+    private var activeTint: Color {
+        isHovered ? (hoverTint ?? tint) : tint
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(isEnabled ? Color.secondary : Color.secondary.opacity(0.45))
+            .foregroundStyle(isEnabled ? activeTint : Color.secondary.opacity(0.45))
             .background {
                 Circle()
-                    .fill(Color.primary.opacity(configuration.isPressed && isEnabled ? 0.12 : 0.06))
+                    .fill(isEnabled
+                          ? activeTint.opacity(configuration.isPressed ? 0.24 : isHovered ? 0.17 : 0.09)
+                          : Color.primary.opacity(0.04))
             }
             .contentShape(Circle())
+            .onHover { isHovered = $0 }
     }
 }
 

@@ -120,15 +120,17 @@ private struct DictationMenu: View {
     var body: some View {
         Text(model.state.rawValue)
         if model.active {
-            Button("Pause & Copy") { model.pause() }
-                .disabled(model.state == .finalizing)
+            Button("Pause & copy") { model.pause() }
+                .disabled(model.state == .finalizing || model.isClosing)
         } else {
-            Button(model.isPresented ? "Continue Dictation" : "Start Dictation", action: startDictation)
+            Button(model.isPresented && (!model.transcript.isEmpty || model.recordingSeconds > 0)
+                   ? "Resume" : "Start dictation", action: startDictation)
+                .disabled(model.isClosing)
         }
         if model.isPresented {
-            Button("Finish & Copy") { model.close() }
+            Button("Copy & close") { model.close() }
                 .disabled(model.isClosing)
-            Button("Cancel Dictation") { model.togglePresentation() }
+            Button("Cancel dictation") { model.discardAndDismiss() }
         }
         Divider()
         Button("Settings…", action: showWindow)

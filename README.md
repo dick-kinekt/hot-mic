@@ -13,9 +13,10 @@ Hot Mic is a native macOS dictation app that streams microphone audio to the Ele
 - Configurable global, single-press shortcut; the initial suggested shortcut is Control–Option–Space when available.
 - Native SwiftUI/AppKit settings and a non-focus-stealing recording bar.
 - Direct realtime transcription with live provisional text and finalized copied results.
-- Pause, continue, reset, and finish-and-close controls.
+- Compact Pause & copy, Resume, manual copy, Reset, and Copy & close controls.
+- Optional OpenAI text cleanup with saved-session updates and one-level Undo.
 - English, Dutch, or automatic language selection plus optional vocabulary hints.
-- API key stored only in the macOS Keychain; no plaintext fallback.
+- Provider API keys stored only in separate macOS Keychain items; no plaintext fallback.
 - Local transcript archive with configurable automatic retention (14 days by default).
 - No app-created audio files, backend, analytics, or automatic paste.
 
@@ -25,6 +26,7 @@ Hot Mic is a native macOS dictation app that streams microphone audio to the Ele
 - Full Xcode 26 or later (Swift 6.2) for building from source; the pinned `KeyboardShortcuts` dependency requires Swift 6.2.
 - An ElevenLabs account, API key with speech-to-text access, and available credit for dictation.
 - A microphone and macOS microphone permission.
+- Optional: an OpenAI API key with Responses API / GPT-5.6 Terra access and credit for text cleanup. Recording does not require this key.
 
 The Xcode target and scheme are named `Dictation`; the product is **Hot Mic.app**. Release packaging builds universal `arm64` and `x86_64` binaries.
 
@@ -60,11 +62,11 @@ Never put an API key in source, a shell command, a `.env` file, an issue, or a c
 
 The shortcut is **single press**, not hold-to-talk:
 
-1. Press it once to start a new dictation and show the floating bar. Press it again while the bar is visible to cancel and dismiss the dictation. This discards current text, stops pending finalization, and leaves the clipboard unchanged.
-2. Select **Pause** to turn the microphone off and finalize the current stream. On success, Hot Mic copies the complete accumulated dictation to the clipboard.
-3. Select **Continue** to add another recording segment to the same dictation. The next pause copies all accumulated text, not only the new segment.
-4. Select **Reset** (the arrow button) to discard current text, stop pending finalization, clear the timer, and leave the bar paused and ready for a fresh continuation. The clipboard is unchanged.
-5. Select **Close** while recording to finalize and copy before dismissing. Closing an already copied paused dictation dismisses it. If finalization or copying fails, the bar remains open with recovery actions to copy the available text or open settings.
+1. Press it once to start a new dictation and show the floating bar. Press it again to stop capture immediately, finish transcription, copy the final text, briefly show **Copied**, and close. Repeated presses while closing are ignored.
+2. Select **Pause & copy** to turn the microphone off and finalize the current stream. On success, Hot Mic copies the complete accumulated dictation and keeps the bar open. The blue overlapping-documents button beside it copies the text again; the **Copied** status confirms success.
+3. Select **Resume** to add another recording segment to the same dictation. The next Pause & copy copies all accumulated text, not only the new segment. An empty, zero-duration session offers **Start** instead.
+4. Select **Reset** (the orange arrow button) to discard current text, stop pending work, clear the timer, and leave the bar ready for a new recording. **Cancel dictation** in the menu explicitly discards and dismisses. Neither action copies text; archived stable text is retained.
+5. Select **×** or **Copy & close** to finish and copy before dismissing. Even an already-copied stopped session is copied again, in case another app replaced the clipboard. The roughly 600 ms confirmation starts only after a successful clipboard write. If finalization or copying fails, the bar and recoverable text stay available. Closing the separate Settings window does not stop recording.
 
 The preview follows live provisional text and can be expanded to review the current dictation. Finalized text—not a provisional hypothesis—is copied. The recording bar does not activate Hot Mic or take focus from the destination app. Hot Mic does not paste text, send Return, or restore focus after copying.
 Expanded review follows new text only while you are at the bottom. Scroll up to
@@ -72,17 +74,56 @@ read without being pulled back down; **Latest** resumes following. Collapse
 returns to the latest two lines. Language, vocabulary and privacy choices persist
 between launches; **Session** shows only the current dictation, not saved history.
 
+### Optional text cleanup
+
+In **General → OpenAI text cleanup**, enter an OpenAI API key and select **Save Key**.
+It is stored separately in macOS Keychain under service `local.Dictation.openai`
+and account `api-key`. The field never reveals the stored key and clears after
+saving or closing settings. Removing this key does not affect recording or Undo.
+
+After Pause & copy, select **Clean up text** beside Expand. Its purple icon and
+high-contrast label indicate availability; it is muted while unavailable.
+Each explicit click sends only the current stopped transcript to OpenAI's
+Responses API using `gpt-5.6-terra`, with reasoning disabled and `store: false`.
+It does not send audio, past sessions, or a conversation history. Internet access
+and OpenAI usage credit are required; there is no local fallback or automatic retry.
+
+The model is instructed to remove clear fillers, stutters, and false starts and
+repair grammar and punctuation without summarizing, translating, inventing facts,
+or changing meaning. English, Dutch, mixed language, names, numbers, negations,
+uncertainty, code, URLs, and literal quotations should be preserved. These are
+instructions, not a guarantee: review the result and use Undo when necessary.
+
+A changed result updates the **same saved session** in Transcripts and is copied
+to the clipboard. **Undo cleanup** restores and copies the original text without
+a network request; it is available only in memory until Resume, Reset, Clear, or
+Close. Resume retains an applied cleaned prefix and appends new raw dictation
+without automatically cleaning it. Closing or manually copying during cleanup
+cancels the pending request and uses the currently visible authoritative text.
+Late successes or errors cannot overwrite a newer session.
+
+An identical result is recopied without updating the archive's retention timestamp.
+An empty, refused, incomplete, malformed, or failed response leaves the original,
+archive, and clipboard unchanged. Authentication, quota, network, and timeout
+errors allow a manual retry. Clipboard failure after a successful cleanup retains
+the cleaned text and Undo; archive-save failures are reported.
+
+Cleanup accepts at most **96,000 UTF-8 bytes** per request, with a **32,768-token**
+output cap, a 45-second request timeout and a 60-second resource timeout. Oversized
+input is rejected without sending it; text is never silently truncated or split.
+This cleanup limit is separate from the 24-hour recording limit.
+
 ## Transcript archive and recording duration
 
 **Transcripts** lists saved sessions with their text, date, recording duration and
-language. Pause/Continue updates one session; Reset, shortcut cancellation and
-Clear Result clear the live text but keep already archived stable text. Provider
+language. Pause & copy/Resume updates one session; Reset, explicit cancellation and
+Clear result clear the live text but keep already archived stable text. Provider
 commits are checkpointed during recording; finalization updates the saved result.
 Interrupted sessions are marked incomplete. Provisional live guesses are not saved.
 Earlier dictations from versions without the archive cannot be recovered.
 
-The app permits **24 hours of continuous recording** before automatically pausing,
-finalizing and copying. Continue starts another stretch in the same session.
+The app permits **24 hours of continuous recording** before automatically stopping,
+finalizing and copying. Resume starts another stretch in the same session.
 Provider restrictions, connection failures and sleep can still interrupt capture;
 this is not a guarantee of an uninterrupted 24-hour provider connection.
 
@@ -113,6 +154,15 @@ Before real use, turn off **Terms and privacy → Data use → Improve the model
 
 The **Request zero retention** setting sends `enable_logging=false`. It is intended for eligible enterprise accounts. If ElevenLabs rejects the request, dictation fails rather than silently falling back to ordinary retention. When the setting is off, ordinary provider retention applies. Provider eligibility and account configuration are outside Hot Mic's control.
 
+Optional **Clean up text** sends the current stopped transcript directly to OpenAI
+and incurs separate OpenAI API charges. No automatic cleanup occurs during recording
+or on Pause & copy. Requests use `store: false`, no tools, no conversation state,
+and no disk HTTP cache. Redirects are rejected instead of forwarding text or keys.
+OpenAI does not use API data for training by default, but abuse-monitoring logs may
+normally be retained for up to 30 days (with exceptions in its policy).
+`store: false` and the ElevenLabs retention setting do **not** guarantee OpenAI
+zero retention. Account eligibility and data controls remain provider-managed.
+
 Copied text is placed on the system clipboard. Clipboard managers, sync services, and other apps may retain it.
 
 Useful provider references:
@@ -121,6 +171,9 @@ Useful provider references:
 - [Realtime transcripts and commit strategies](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/transcripts-and-commit-strategies.md)
 - [Model-training opt-out](https://elevenlabs.io/docs/help-center/legal/is-my-data-used-to-improve-eleven-labs-ai-models.md)
 - [Zero retention mode](https://elevenlabs.io/docs/eleven-api/resources/zero-retention-mode.md)
+- [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [GPT-5.6 Terra model and pricing](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
+- [OpenAI API data controls](https://developers.openai.com/api/docs/guides/your-data)
 
 ## Troubleshooting
 ### Xcode command-line tools are selected instead of Xcode
@@ -174,7 +227,7 @@ workflow recovery, and local DMG packaging.
 
 ## Focused checks
 
-The retained checks use synthetic audio, a local loopback fixture, fakes, or a private test pasteboard. They do not call ElevenLabs, use the app API key, or open the microphone. Run the smallest relevant check for a change.
+The retained checks use synthetic audio, a local loopback fixture, an intercepted URLSession, fakes, or a private test pasteboard. They do not call ElevenLabs or OpenAI, use real API keys, or open the microphone. Run the smallest relevant check for a change.
 
 The realtime transport regression requires Xcode and Bun:
 
@@ -202,9 +255,19 @@ xcrun swiftc -target "$ARCH-apple-macosx14.0" -swift-version 6 \
   -framework AppKit -framework AVFoundation -framework Security \
   Dictation/AudioCapture.swift Dictation/CredentialStore.swift \
   Dictation/DictationSettings.swift Dictation/RealtimeClient.swift \
+  Dictation/OpenAITextCleaner.swift \
   Dictation/TranscriptArchive.swift Dictation/TranscriptionCoordinator.swift Tests/RecordingWorkflowSmoke.swift \
   -o .build/verification/recording-workflow-smoke
 .build/verification/recording-workflow-smoke
+```
+
+OpenAI cleanup request, failure, refusal, partial-output, redirect and cancellation boundaries:
+
+```sh
+xcrun swiftc -swift-version 6 -warnings-as-errors -strict-concurrency=complete \
+  -parse-as-library Dictation/OpenAITextCleaner.swift Tests/OpenAITextCleanerSmoke.swift \
+  -o .build/verification/openai-cleaner-smoke
+.build/verification/openai-cleaner-smoke
 ```
 
 Archive persistence, retention boundaries, policy updates and corruption checks:

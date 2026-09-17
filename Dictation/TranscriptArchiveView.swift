@@ -62,7 +62,7 @@ struct TranscriptArchiveView: View {
                         .foregroundStyle(.secondary)
                     Text("No archived transcripts")
                         .font(.callout.weight(.medium))
-                    Text("Stable completed text will appear here after you pause or finish a dictation.")
+                    Text("Stable completed text will appear here after Pause & copy or Copy & close.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)

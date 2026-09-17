@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Make the global recording shortcut finish, copy, briefly confirm success, and close; retain a separate explicit Cancel action.
+- Recopy stopped sessions on Close, keep failed copies visible, and prevent duplicate or stale close operations.
+- Add optional OpenAI text cleanup using GPT-5.6 Terra, a separate Keychain credential, and explicit cloud/privacy disclosure; replace the local filler filter while preserving same-session archive updates, clipboard, transient Undo and cancellation-safe completion.
+- Use smaller Pause & copy / Resume controls and show cleanup beside Expand without changing the panel dimensions.
+- Make available cleanup more legible with a purple icon; add a blue manual copy control with a persistent overlapping-documents icon, orange Reset and red Close hover.
+- Bound compact-preview layout to the latest text so very long sessions do not stall the controls; expanded review and copied/saved text remain complete.
+
 ## 0.2.0 — 2026-09-09
 
 - Raise the continuous recording ceiling from five minutes to 24 hours, retaining pause/finalize/copy behavior.
